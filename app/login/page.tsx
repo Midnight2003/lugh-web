@@ -93,7 +93,7 @@ export default function LoginPage() {
 
       {/* LEFT PANEL — decorative */}
       <div style={{
-        flex: '0 0 420px', background: '#1a1a1a', display: 'flex', flexDirection: 'column',
+        flex: '0 0 420px', background: '#1a1a1a', flexDirection: 'column',
         justifyContent: 'space-between', padding: '48px 40px', display: 'none'
       }} className="left-panel">
       </div>
