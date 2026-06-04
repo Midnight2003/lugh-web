@@ -23,6 +23,7 @@ type FileMeta = {
   uploaded_at: string
   storage_path: string
   student_id: string
+  source_node_id?: string | null
   file_url?: string
 }
 
@@ -322,16 +323,35 @@ export default function Home() {
     setToastMessage('Student updated successfully.')
   }
 
+  async function validateParentFolder(parentId: string | null, userId: string): Promise<boolean> {
+    if (!parentId) return true
+    const { data, error } = await supabase.from('nodes').select('id').eq('id', parentId).eq('user_id', userId).single()
+    return !error && data !== null
+  }
+
   async function createFolder() {
     if (!folderName || !user?.id) { alert('Missing folder name or user'); return }
     try {
+      if (currentFolderId) {
+        const parentExists = await validateParentFolder(currentFolderId, user.id)
+        if (!parentExists) {
+          setToastType('error')
+          setToastMessage('Parent folder not found or deleted.')
+          return
+        }
+      }
       await createNode({ name: folderName, type: 'folder', parent_id: currentFolderId ?? null, user_id: user.id })
       setFolderName('')
       setShowFolderModal(false)
       setToastType('success')
       setToastMessage('Folder created successfully.')
     } catch (error: any) {
-      console.error('CREATE FOLDER ERROR:', error)
+      console.error('CREATE FOLDER ERROR:', error, {
+        message: error?.message,
+        details: error?.details,
+        hint: error?.hint,
+        stack: error?.stack
+      })
       setToastType('error')
       setToastMessage(error?.message || 'Failed to create folder.')
     }
@@ -361,10 +381,22 @@ export default function Home() {
       setStudentPhotoFile(null)
       setStudentPhotoPreview(null)
       setShowStudentModal(false)
+      setTab('folders')
+      if (studentsFolderId) {
+        const studentsNode = nodes.find(n => n.id === studentsFolderId)
+        if (studentsNode) {
+          navigateToFolder(studentsNode)
+        }
+      }
       setToastType('success')
       setToastMessage('Student created successfully.')
     } catch (error: any) {
-      console.error('CREATE STUDENT ERROR:', error)
+      console.error('CREATE STUDENT ERROR:', error, {
+        message: error?.message,
+        details: error?.details,
+        hint: error?.hint,
+        stack: error?.stack
+      })
       setToastType('error')
       setToastMessage(error?.message || 'Failed to create student.')
     }
@@ -1005,21 +1037,34 @@ export default function Home() {
 
     const previousContents = studentFolderContents
     const previousNodes = nodes
-    setStudentFolderContents(prev => prev.map(node => node.id === item.id ? {
+    const sourceNodeId = item.fileMeta?.source_node_id || item.id
+    const copyIds = await getCompiledCopyNodeIds(sourceNodeId)
+    const updateIds = Array.from(new Set([sourceNodeId, ...copyIds]))
+
+    setStudentFolderContents(prev => prev.map(node => updateIds.includes(node.id) ? {
       ...node,
       name: newName,
       fileMeta: node.fileMeta ? { ...node.fileMeta, name: newName } : node.fileMeta
     } : node))
-    setNodes(prev => prev.map(node => node.id === item.id ? { ...node, name: newName } : node))
+    setNodes(prev => prev.map(node => updateIds.includes(node.id) ? { ...node, name: newName } : node))
 
     try {
-      await updateNode(item.id, { name: newName })
-      const { error } = await supabase.from('files').update({ name: newName }).eq('node_id', item.id)
-      if (error) throw error
+      await supabase.from('nodes').update({ name: newName }).in('id', updateIds)
+      const { error: sourceError } = await supabase.from('files').update({ name: newName }).eq('node_id', sourceNodeId)
+      if (sourceError) throw sourceError
+      if (copyIds.length > 0) {
+        const { error: copiesError } = await supabase.from('files').update({ name: newName }).eq('source_node_id', sourceNodeId)
+        if (copiesError) throw copiesError
+      }
       setToastType('success')
       setToastMessage('File renamed successfully.')
     } catch (err: any) {
-      console.error('RENAME FILE ERROR:', err)
+      console.error('RENAME FILE ERROR:', err, {
+        message: err?.message,
+        details: err?.details,
+        hint: err?.hint,
+        stack: err?.stack
+      })
       setStudentFolderContents(previousContents)
       setNodes(previousNodes)
       setToastType('error')
@@ -1031,12 +1076,24 @@ export default function Home() {
     if (!item.fileMeta || !user?.id) return
     const previousContents = studentFolderContents
     const previousNodes = nodes
-    setStudentFolderContents(prev => prev.filter(node => node.id !== item.id))
-    setNodes(prev => prev.filter(node => node.id !== item.id))
+    const isCopy = Boolean(item.fileMeta.source_node_id)
+    const sourceNodeId = item.fileMeta.source_node_id || item.id
+    const copyIds = !isCopy ? await getCompiledCopyNodeIds(item.id) : []
+
+    setStudentFolderContents(prev => prev.filter(node => node.id !== item.id && !copyIds.includes(node.id)))
+    setNodes(prev => prev.filter(node => node.id !== item.id && !copyIds.includes(node.id)))
 
     try {
-      const { error: storageError } = await supabase.storage.from('student-files').remove([item.fileMeta.storage_path])
-      if (storageError) throw storageError
+      if (!isCopy && copyIds.length > 0) {
+        const { error: deleteCopiesError } = await supabase.from('nodes').delete().in('id', copyIds)
+        if (deleteCopiesError) throw deleteCopiesError
+      }
+
+      if (!isCopy) {
+        const { error: storageError } = await supabase.storage.from('student-files').remove([item.fileMeta.storage_path])
+        if (storageError) throw storageError
+      }
+
       const { error: metadataError } = await supabase.from('files').delete().eq('node_id', item.id)
       if (metadataError) throw metadataError
       const { error: nodeError } = await supabase.from('nodes').delete().eq('id', item.id).eq('user_id', user.id)
@@ -1044,7 +1101,12 @@ export default function Home() {
       setToastType('success')
       setToastMessage('File deleted successfully.')
     } catch (err: any) {
-      console.error('DELETE FILE ERROR:', err)
+      console.error('DELETE FILE ERROR:', err, {
+        message: err?.message,
+        details: err?.details,
+        hint: err?.hint,
+        stack: err?.stack
+      })
       setStudentFolderContents(previousContents)
       setNodes(previousNodes)
       setToastType('error')
@@ -1155,12 +1217,12 @@ export default function Home() {
   async function copyFileToFolder(sourceFileId: string, targetFolderId: string) {
     const { data: sourceNode, error: nodeError } = await supabase.from('nodes').select('*').eq('id', sourceFileId).single()
     if (nodeError || !sourceNode) {
-      throw nodeError || new Error('Source file node not found')
+      throw normalizeSupabaseError(nodeError, 'Source file node not found')
     }
 
     const { data: fileMeta, error: fileMetaError } = await supabase.from('files').select('*').eq('node_id', sourceFileId).single()
     if (fileMetaError || !fileMeta) {
-      throw fileMetaError || new Error('Source file metadata not found')
+      throw normalizeSupabaseError(fileMetaError, 'Source file metadata not found')
     }
 
     const { data: newFileNode, error: createError } = await supabase.from('nodes')
@@ -1174,10 +1236,10 @@ export default function Home() {
       .single()
 
     if (createError || !newFileNode) {
-      throw createError || new Error('Failed to create compiled file node')
+      throw normalizeSupabaseError(createError, 'Failed to create compiled file node')
     }
 
-    const metadata = {
+    const baseMetadata = {
       node_id: newFileNode.id,
       name: fileMeta.name,
       size: fileMeta.size,
@@ -1187,13 +1249,37 @@ export default function Home() {
       student_id: fileMeta.student_id
     }
 
-    const { error: insertMetaError } = await supabase.from('files').insert(metadata)
+    let { error: insertMetaError } = await supabase.from('files').insert({
+      ...baseMetadata,
+      source_node_id: sourceFileId
+    })
+
     if (insertMetaError) {
-      await supabase.from('nodes').delete().eq('id', newFileNode.id)
-      throw insertMetaError
+      const missingColumn = typeof insertMetaError.message === 'string'
+        ? insertMetaError.message.includes('source_node_id')
+        : false
+
+      if (missingColumn) {
+        console.warn('source_node_id column missing in files table, retrying metadata insert without it.')
+        const { error: retryError } = await supabase.from('files').insert(baseMetadata)
+        if (retryError) {
+          await supabase.from('nodes').delete().eq('id', newFileNode.id)
+          throw normalizeSupabaseError(retryError, 'Failed to create compiled file metadata')
+        }
+      } else {
+        await supabase.from('nodes').delete().eq('id', newFileNode.id)
+        throw normalizeSupabaseError(insertMetaError, 'Failed to create compiled file metadata')
+      }
     }
 
     return newFileNode.id
+  }
+
+  function normalizeSupabaseError(error: any, fallback: string) {
+    if (!error) return new Error(fallback)
+    if (error instanceof Error) return error
+    const message = typeof error.message === 'string' ? error.message : JSON.stringify(error)
+    return new Error(message || fallback)
   }
 
   async function ensureCompiledFoldersTableAccessible() {
@@ -1217,6 +1303,37 @@ export default function Home() {
     }
 
     return true
+  }
+
+  async function getCompiledCopyNodeIds(sourceFileId: string) {
+    const { data, error } = await supabase.from('files').select('node_id').eq('source_node_id', sourceFileId)
+    if (error) {
+      console.error('LOAD COMPILED COPY IDS ERROR:', error)
+      return [] as string[]
+    }
+    return (data || []).map(row => row.node_id)
+  }
+
+  async function syncCompiledCopiesForSource(sourceFileId: string, newName: string) {
+    const copyIds = await getCompiledCopyNodeIds(sourceFileId)
+    if (copyIds.length === 0) return
+
+    const { error: nodeError } = await supabase.from('nodes').update({ name: newName }).in('id', copyIds)
+    if (nodeError) {
+      console.error('SYNC COPY NODE NAMES ERROR:', nodeError)
+    }
+
+    const { error: fileError } = await supabase.from('files').update({ name: newName }).eq('source_node_id', sourceFileId)
+    if (fileError) {
+      console.error('SYNC COPY FILE META NAMES ERROR:', fileError)
+    }
+  }
+
+  async function deleteCompiledCopiesForSource(sourceFileId: string) {
+    const copyIds = await getCompiledCopyNodeIds(sourceFileId)
+    if (copyIds.length === 0) return
+    const { error } = await supabase.from('nodes').delete().in('id', copyIds)
+    if (error) console.error('DELETE COMPILED COPY NODES ERROR:', error)
   }
 
   async function createCompiledFolder() {
@@ -1263,8 +1380,13 @@ export default function Home() {
       try {
         const copiedId = await copyFileToFolder(sourceFileId, folderNode.id)
         copiedFileIds.push(copiedId)
-      } catch (error) {
-        console.error('COPY COMPILED FILE ERROR:', error)
+      } catch (error: any) {
+        console.error('COPY COMPILED FILE ERROR:', error, {
+          message: error?.message,
+          details: error?.details,
+          hint: error?.hint,
+          stack: error?.stack
+        })
       }
     }
 
