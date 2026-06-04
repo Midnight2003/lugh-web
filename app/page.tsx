@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef } from 'react'
 import Image from 'next/image'
 import { supabase } from '@/lib/supabase'
-import { useRouter, useSearchParams } from 'next/navigation'
+import { useRouter } from 'next/navigation'
 import blacklogo from '../image/blacklogo.png'
 import whitelogo1 from '../image/whitelogo1.png'
 
@@ -34,7 +34,6 @@ type Tag = { id: string; name: string }
 
 export default function Home() {
   const router = useRouter()
-  const searchParams = useSearchParams()
 
   const [navigationStack, setNavigationStack] = useState<Node[]>([])
   const [tab, setTab] = useState<'folders' | 'students'>('folders')
@@ -137,6 +136,8 @@ export default function Home() {
     btnGhostText: dark ? '#ccc' : '#555',
     btnGhostHover: dark ? '#222' : '#f5f4f0',
     avatarBg: dark ? '#222' : '#f5f4f0',
+    initialsBg: dark ? '#4f46e5' : '#8b5cf6',
+    initialsText: '#fff',
     folderIconBg: dark ? '#2a2200' : '#fef9ec',
     modalOverlay: 'rgba(0,0,0,0.6)',
     modalBg: dark ? '#1a1a1a' : '#fff',
@@ -147,8 +148,10 @@ export default function Home() {
     fabBg: dark ? '#f0f0f0' : '#1a1a1a',
     fabText: dark ? '#0f0f0f' : '#fff',
     deleteBtn: dark ? '#444' : '#ccc',
-    deleteBtnHover: '#e53e3e',
+    deleteBtnHover: dark ? '#f87171' : '#c51f37',
     deleteBtnHoverBg: dark ? '#2d0f0f' : '#fff5f5',
+    toastSuccess: '#22c55e',
+    toastError: '#ef4444',
   }
 
   // Auth
@@ -177,7 +180,8 @@ export default function Home() {
   useEffect(() => {
     if (!user?.id || initialNavigationRestored) return
     const restore = async () => {
-      const pathParam = searchParams.get('path')
+      const params = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null
+      const pathParam = params?.get('path')
       if (!pathParam) {
         setNavigationStack([])
         setInitialNavigationRestored(true)
@@ -212,7 +216,7 @@ export default function Home() {
     }
 
     restore()
-  }, [user, searchParams, initialNavigationRestored])
+  }, [user, initialNavigationRestored])
 
   useEffect(() => {
     if (!user?.id || !initialNavigationRestored) return
@@ -866,23 +870,40 @@ export default function Home() {
   const filteredStudents = studentRecords.filter(s => s.name.toLowerCase().includes(searchQuery.toLowerCase()))
 
   useEffect(() => {
+    const studentsWithNewPhotos = filteredStudents.filter(
+      s => s.profile_photo_path && !studentAvatarUrls[s.id]
+    )
+    if (studentsWithNewPhotos.length === 0) return
+
     const loadStudentAvatars = async () => {
-      const newUrls: Record<string, string> = {}
-      await Promise.all(filteredStudents.map(async student => {
-        if (!student.profile_photo_path) return
-        try {
-          const { data, error } = await supabase.storage.from('student-files').createSignedUrl(student.profile_photo_path, 60)
-          if (!error && data?.signedUrl) {
-            newUrls[student.id] = data.signedUrl
-          }
-        } catch (err) {
-          console.error('LOAD STUDENT AVATAR ERROR:', err)
+      const paths = studentsWithNewPhotos.map(s => s.profile_photo_path as string)
+      if (paths.length === 0) return
+
+      try {
+        const { data, error } = await supabase.storage
+          .from('student-files')
+          .createSignedUrls(paths, 3600)
+
+        if (error || !data) {
+          console.error('LOAD STUDENT AVATARS ERROR:', error)
+          return
         }
-      }))
-      setStudentAvatarUrls(prev => ({ ...prev, ...newUrls }))
+
+        const newUrls: Record<string, string> = {}
+        studentsWithNewPhotos.forEach(student => {
+          const match = data.find(item => item.path === student.profile_photo_path)
+          if (match?.signedUrl) {
+            newUrls[student.id] = match.signedUrl
+          }
+        })
+        setStudentAvatarUrls(prev => ({ ...prev, ...newUrls }))
+      } catch (err) {
+        console.error('LOAD STUDENT AVATARS ERROR:', err)
+      }
     }
+
     loadStudentAvatars()
-  }, [filteredStudents])
+  }, [filteredStudents, studentAvatarUrls])
 
   const activeSectionLabel = tab === 'folders' ? 'Folders' : 'Students'
 
@@ -898,6 +919,16 @@ export default function Home() {
     if (!value) return ''
     const date = new Date(value)
     return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+  }
+
+  function getInitials(name: string) {
+    return name
+      .split(' ')
+      .filter(Boolean)
+      .map(word => word[0])
+      .slice(0, 2)
+      .join('')
+      .toUpperCase()
   }
 
   function getFileTypeIcon(mime: string) {
@@ -992,9 +1023,9 @@ export default function Home() {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {studentFolderContents.map(item => (
-          <div key={item.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 14px', background: t.chipBg, borderRadius: 12, border: `1px solid ${t.cardBorder}` }}>
+          <div key={item.id} className="file-row">
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, minWidth: 0 }}>
-              <div style={{ width: 36, height: 36, borderRadius: 10, background: t.inputBorder, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>
+              <div className="file-icon">
                 {item.type === 'folder' ? '📁' : item.fileMeta ? getFileTypeIcon(item.fileMeta.mime_type) : '📎'}
               </div>
               <div style={{ minWidth: 0 }}>
@@ -1006,17 +1037,17 @@ export default function Home() {
                 )}
               </div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+            <div className="file-actions">
               {item.type === 'folder' ? (
                 <>
-                  <button onClick={() => handleStudentFolderOpen(item)} style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 14 }}>Open</button>
-                  <button onClick={() => openDeleteConfirm(item)} style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 14 }}>Delete</button>
+                  <button onClick={() => handleStudentFolderOpen(item)}>Open</button>
+                  <button onClick={() => openDeleteConfirm(item)}>Delete</button>
                 </>
               ) : (
                 <>
-                  <button onClick={() => openFilePreview(item)} style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 14 }}>Preview</button>
-                  <button onClick={() => renameFile(item)} style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 14 }}>Rename</button>
-                  <button onClick={() => openDeleteConfirm(item)} style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 14 }}>Delete</button>
+                  <button onClick={() => openFilePreview(item)}>Preview</button>
+                  <button onClick={() => renameFile(item)}>Rename</button>
+                  <button onClick={() => openDeleteConfirm(item)}>Delete</button>
                 </>
               )}
             </div>
@@ -1178,72 +1209,114 @@ export default function Home() {
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: t.bg, fontFamily: "'DM Sans', sans-serif", transition: 'background 0.2s' }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
+        .app-shell { min-height: 100vh; display: flex; flex-direction: column; background: ${t.bg}; font-family: 'DM Sans', sans-serif; transition: background 0.2s; color: ${t.text}; }
         * { box-sizing: border-box; }
-        .card { border-radius: 14px; transition: box-shadow 0.18s, transform 0.18s; }
-        .card:hover { transform: translateY(-1px); }
-        .tab-btn { background: transparent; border: none; padding: 8px 18px; font-family: inherit; font-size: 14px; font-weight: 500; cursor: pointer; border-radius: 8px; transition: all 0.15s; }
+        .card { background: ${t.card}; border: 1px solid ${t.cardBorder}; border-radius: 18px; transition: transform 0.18s, box-shadow 0.18s; }
+        .card:hover { transform: translateY(-1px); box-shadow: ${t.cardHoverShadow}; }
+        .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+        .card-content { padding: 20px; min-height: 180px; display: flex; flex-direction: column; justify-content: space-between; }
+        .card-icon { width: 40px; height: 40px; border-radius: 12px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+        .avatar-initials { width: 40px; height: 40px; border-radius: 12px; background: ${t.initialsBg}; color: ${t.initialsText}; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; }
+        .btn { font-family: inherit; font-size: 14px; font-weight: 600; border-radius: 12px; padding: 10px 20px; cursor: pointer; transition: all 0.15s; }
+        .btn-primary { background: ${t.btnPrimary}; color: ${t.btnPrimaryText}; border: none; }
+        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-secondary { background: transparent; color: ${t.btnGhostText}; border: 1px solid ${t.btnGhostBorder}; }
+        .btn-secondary:hover { background: ${t.btnGhostHover}; }
+        .btn-ghost { background: transparent; color: ${t.btnGhostText}; border: 1px solid ${t.btnGhostBorder}; }
+        .btn-ghost:hover { background: ${t.btnGhostHover}; }
+        .btn-text { background: transparent; border: none; color: ${t.textMuted}; }
+        .btn-text:hover { color: ${t.text}; }
+        .btn-delete { background: transparent; border: none; color: ${t.deleteBtn}; padding: 8px; border-radius: 10px; }
+        .btn-delete:hover { color: ${t.tabActiveText}; background: ${t.btnGhostHover}; }
         .modal-overlay { position: fixed; inset: 0; backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 300; padding: 16px; }
-        .modal { border-radius: 18px; padding: 28px; width: 100%; max-width: 420px; box-shadow: 0 20px 60px rgba(0,0,0,0.2); }
+        .modal { border-radius: 20px; padding: 28px; width: 100%; max-width: 420px; background: ${t.modalBg}; box-shadow: ${t.cardHoverShadow}; }
         .modal-lg { max-width: 540px; }
-        .app-input { width: 100%; padding: 10px 14px; border-radius: 10px; font-family: inherit; font-size: 14px; outline: none; transition: border-color 0.15s; }
-        .app-input:focus { outline: none; }
-        .delete-btn { background: transparent; border: none; cursor: pointer; font-size: 16px; padding: 4px 8px; border-radius: 6px; transition: color 0.15s, background 0.15s; }
-        .fab { position: fixed; bottom: 28px; right: 28px; width: 52px; height: 52px; border: none; border-radius: 50%; font-size: 24px; cursor: pointer; box-shadow: 0 4px 20px rgba(0,0,0,0.25); transition: transform 0.15s, background 0.15s; display: flex; align-items: center; justify-content: center; }
-        .fab:hover { transform: scale(1.07); }
-        .student-card { cursor: pointer; }
-        .dark-toggle { background: none; border: none; cursor: pointer; font-size: 18px; padding: 6px; border-radius: 8px; transition: background 0.15s; }
-        .dark-toggle:hover { background: rgba(128,128,128,0.15); }
-        .fab-menu { position: absolute; bottom: 70px; right: 20px; background: ${t.modalBg}; border: 1px solid ${t.cardBorder}; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); overflow: hidden; z-index: 101; }
-        .fab-menu-item { padding: 12px 24px; cursor: pointer; font-size: 14px; font-weight: 500; color: ${t.text}; transition: background 0.15s; white-space: nowrap; }
-        .fab-menu-item:hover { background: ${t.btnGhostHover}; }
+        .modal-header { margin: 0 0 16px; font-size: 18px; font-weight: 700; color: ${t.text}; }
+        .modal-body { display: flex; flex-direction: column; gap: 16px; }
+        .modal-footer { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+        .app-input { width: 100%; padding: 12px 14px; border-radius: 12px; font-family: inherit; font-size: 14px; outline: none; border: 1px solid ${t.inputBorder}; background: ${t.inputBg}; color: ${t.text}; transition: border-color 0.15s; }
+        .app-input:focus { outline: none; border-color: ${t.tabActiveText}; }
+        .topbar { background: ${t.topbar}; border-bottom: 1px solid ${t.topbarBorder}; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 72px; }
+        .brand { display: flex; align-items: center; gap: 12px; }
+        .brand-copy { display: flex; flex-direction: column; gap: 2px; }
+        .brand-title { font-size: 18px; font-weight: 700; letter-spacing: 0.01em; color: ${t.text}; }
+        .brand-subtitle { font-size: 12px; color: ${t.textMuted}; }
+        .tab-bar { display: flex; align-items: center; gap: 8px; }
+        .tab-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid transparent; border-radius: 999px; padding: 10px 16px; font-weight: 700; background: transparent; color: ${t.textMuted}; transition: background 0.15s, border-color 0.15s, color 0.15s; }
+        .tab-btn.active { background: ${t.tabActiveBg}; color: ${t.tabActiveText}; border-color: ${t.tabActiveText}; }
+        .tab-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 24px; border-radius: 999px; background: ${t.chipBg}; color: ${t.textMuted}; font-size: 12px; padding: 0 8px; }
+        .topbar-actions { display: flex; align-items: center; gap: 12px; }
+        .topbar-pill { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 999px; background: ${t.card}; border: 1px solid ${t.cardBorder}; }
+        .topbar-pill .avatar-circle { width: 32px; height: 32px; border-radius: 50%; background: ${t.initialsBg}; color: ${t.initialsText}; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; }
+        .topbar-pill .pill-text { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; }
+        .breadcrumb-button { padding: 0; font-size: 13px; text-decoration: underline; }
+        .breadcrumb-button:hover { color: ${t.text}; }
+        .page-content { flex: 1; overflow-y: auto; padding: 32px 24px; max-width: 1240px; width: 100%; margin: 0 auto; }
+        .section-header { display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 16px; margin-bottom: 24px; }
+        .section-title { margin: 0; font-size: 26px; font-weight: 700; color: ${t.text}; }
+        .section-meta { margin: 8px 0 0; color: ${t.textMuted}; font-size: 13px; }
+        .breadcrumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: ${t.textMuted}; font-size: 13px; margin-bottom: 12px; }
+        .breadcrumbs span { display: inline-flex; align-items: center; gap: 8px; }
+        .toast { position: fixed; bottom: 24px; right: 24px; z-index: 200; padding: 14px 18px; border-radius: 14px; color: ${t.btnPrimaryText}; box-shadow: ${t.cardHoverShadow}; min-width: 220px; }
+        .toast.success { background: ${t.toastSuccess}; }
+        .toast.error { background: ${t.toastError}; }
+        .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; min-height: 260px; color: ${t.textMuted}; text-align: center; padding: 24px; }
+        .empty-state-card { width: 120px; height: 120px; border-radius: 24px; background: ${t.card}; border: 1px dashed ${t.cardBorder}; display: flex; align-items: center; justify-content: center; font-size: 42px; }
+        .file-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; background: ${t.chipBg}; border: 1px solid ${t.cardBorder}; border-radius: 12px; }
+        .file-icon { width: 36px; height: 36px; border-radius: 10px; background: ${t.inputBorder}; display: flex; align-items: center; justify-content: center; font-size: 18px; }
+        .file-actions button { background: transparent; border: none; color: ${t.textMuted}; cursor: pointer; font-size: 14px; padding: 8px; }
+        .file-actions button:hover { color: ${t.text}; }
+        .student-detail-screen { position: fixed; top: 60px; left: 0; right: 0; bottom: 0; z-index: 200; overflow-y: auto; background: ${t.bg}; padding: 24px; display: flex; flex-direction: column; }
+        .student-detail-header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+        .student-detail-avatar { width: 48px; height: 48px; border-radius: 50%; background: ${t.avatarBg}; display: flex; align-items: center; justify-content: center; font-size: 22px; }
+        .content-card { background: ${t.modalBg}; border: 1px solid ${t.cardBorder}; border-radius: 18px; padding: 24px; }
+        .button-row { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+        .fab { position: fixed; bottom: 28px; right: 28px; min-width: 54px; min-height: 54px; border: none; border-radius: 999px; font-size: 14px; cursor: pointer; box-shadow: ${t.cardHoverShadow}; transition: transform 0.15s, background 0.15s; display: inline-flex; align-items: center; justify-content: center; gap: 10px; padding: 0 18px; white-space: nowrap; }
+        .fab:hover { transform: translateY(-1px); }
+        .fab-icon { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 50%; background: rgba(255,255,255,0.1); font-size: 20px; }
+        .fab-text { font-size: 14px; font-weight: 700; white-space: nowrap; }
+        .dark-toggle { background: transparent; border: none; cursor: pointer; font-size: 18px; padding: 8px; border-radius: 12px; transition: background 0.15s; color: ${t.text}; }
+        .dark-toggle:hover { background: ${t.btnGhostHover}; }
       `}</style>
 
       {/* Top bar */}
-      <div style={{ background: t.topbar, borderBottom: `1px solid ${t.topbarBorder}`, padding: '0 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: 60 }}>
-        <Image src={dark ? whitelogo1 : blacklogo} alt="Lugh" width={30} height={30} loading="eager" style={{ objectFit: 'contain', width: 'auto', height: 'auto' }} />
-        <div style={{ display: 'flex', gap: 4 }}>
-          <button
-            className="tab-btn"
-            onClick={() => setTab('folders')}
-            style={{
-              background: tab === 'folders' ? t.tabActiveBg : 'transparent',
-              color: tab === 'folders' ? t.tabActiveText : t.tabInactiveText,
-              border: tab === 'folders' ? `1px solid ${t.tabActiveText}` : '1px solid transparent'
-            }}
-          >
+      <div className="topbar">
+        <div className="brand">
+          <Image src={dark ? whitelogo1 : blacklogo} alt="Lugh" width={30} height={30} loading="eager" style={{ objectFit: 'contain', width: 'auto', height: 'auto' }} />
+          <div className="brand-copy">
+            <div className="brand-title">Lugh</div>
+            <div className="brand-subtitle">Student file workspace</div>
+          </div>
+        </div>
+        <div className="tab-bar">
+          <button className={`tab-btn ${tab === 'folders' ? 'active' : ''}`} onClick={() => setTab('folders')}>
             Folders
+            <span className="tab-badge">{filteredFolders.length}</span>
           </button>
-          <button
-            className="tab-btn"
-            onClick={() => setTab('students')}
-            style={{
-              background: tab === 'students' ? t.tabActiveBg : 'transparent',
-              color: tab === 'students' ? t.tabActiveText : t.tabInactiveText,
-              border: tab === 'students' ? `1px solid ${t.tabActiveText}` : '1px solid transparent'
-            }}
-          >
+          <button className={`tab-btn ${tab === 'students' ? 'active' : ''}`} onClick={() => setTab('students')}>
             Students
+            <span className="tab-badge">{filteredStudents.length}</span>
           </button>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 999, background: t.card, border: `1px solid ${t.cardBorder}` }}>
-            <div style={{ width: 32, height: 32, borderRadius: '50%', background: '#8b5cf6', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 700 }}>
+        <div className="topbar-actions">
+          <div className="topbar-pill">
+            <div className="avatar-circle">
               {user?.email ? user.email.charAt(0).toUpperCase() : 'U'}
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', minWidth: 0 }}>
+            <div className="pill-text">
               <span style={{ fontSize: 13, fontWeight: 600, color: t.text }}>{user?.user_metadata?.name || user?.email || 'Signed in'}</span>
               <span style={{ fontSize: 11, color: t.textMuted }}>Account</span>
             </div>
           </div>
-          <button className="dark-toggle" onClick={() => setDark(d => !d)}>{dark ? '☀️' : '🌙'}</button>
-          <button onClick={async () => { await supabase.auth.signOut(); router.push('/login') }} style={{ background: 'transparent', border: 'none', color: t.textMuted, fontSize: 13, cursor: 'pointer' }}>Sign out</button>
+          <button className="btn btn-text dark-toggle" onClick={() => setDark(d => !d)}>{dark ? '☀️' : '🌙'}</button>
+          <button className="btn btn-text" onClick={async () => { await supabase.auth.signOut(); router.push('/login') }}>Sign out</button>
         </div>
       </div>
 
       {/* Main content */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '28px 24px' }}>
+      <div className="page-content">
         {toastMessage && (
-          <div style={{ position: 'fixed', bottom: 24, right: 24, zIndex: 200, padding: '14px 18px', borderRadius: 14, background: toastType === 'success' ? '#22c55e' : '#ef4444', color: '#fff', boxShadow: '0 10px 30px rgba(0,0,0,0.12)' }}>
+          <div className={`toast ${toastType}`}>
             {toastMessage}
           </div>
         )}
@@ -1252,24 +1325,26 @@ export default function Home() {
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, minHeight: 260, color: '#d64545', textAlign: 'center' }}>
             <div style={{ fontSize: 18, fontWeight: 700 }}>Something went wrong.</div>
             <div style={{ maxWidth: 360, color: t.textMuted }}>Please try again. If the problem persists, sign out and sign back in.</div>
-            <button onClick={retryLoad} style={{ background: t.btnPrimary, color: t.btnPrimaryText, border: 'none', borderRadius: 12, padding: '12px 24px', cursor: 'pointer' }}>Retry</button>
+            <button className="btn btn-primary" onClick={retryLoad}>Retry</button>
           </div>
         )}
-        {navigationStack.length > 0 && <button onClick={navigateBack} style={{ background: 'transparent', border: 'none', color: t.textMuted, marginBottom: 20, cursor: 'pointer' }}>← Back</button>}
+        {navigationStack.length > 0 && <button className="btn btn-text" onClick={navigateBack}>← Back</button>}
         {!loading && !errorMessage && (
           <>
-            <div style={{ marginBottom: 20 }}>
-              <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, marginBottom: 10, color: t.textMuted, fontSize: 13 }}>
-                <button type="button" onClick={() => navigateToBreadcrumb(-1)} style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', padding: 0, fontSize: 13, textDecoration: 'underline' }}>Root</button>
-                {navigationStack.map((item, index) => (
-                  <span key={item.id} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                    <span>›</span>
-                    <button type="button" onClick={() => navigateToBreadcrumb(index)} style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', padding: 0, fontSize: 13, textDecoration: 'underline' }}>{item.name}</button>
-                  </span>
-                ))}
+            <div className="section-header">
+              <div>
+                <div className="breadcrumbs">
+                  <button type="button" className="btn btn-text breadcrumb-button" onClick={() => navigateToBreadcrumb(-1)}>Root</button>
+                  {navigationStack.map((item, index) => (
+                    <span key={item.id}>
+                      <span>›</span>
+                      <button type="button" className="btn btn-text breadcrumb-button" onClick={() => navigateToBreadcrumb(index)}>{item.name}</button>
+                    </span>
+                  ))}
+                </div>
+                <h2 className="section-title">{activeSectionLabel}</h2>
+                <p className="section-meta">{tab === 'folders' ? `${filteredFolders.length} folder(s)` : `${filteredStudents.length} student(s)`}</p>
               </div>
-              <h2 style={{ fontSize: 22, fontWeight: 700, color: t.text }}>{activeSectionLabel}</h2>
-              <p style={{ fontSize: 13, color: t.textMuted }}>{tab === 'folders' ? `${filteredFolders.length} folder(s)` : `${filteredStudents.length} student(s)`}</p>
               <input
                 type="text"
                 value={searchQuery}
@@ -1290,12 +1365,12 @@ export default function Home() {
             </div>
             {tab === 'folders' && filteredFolders.length === 0 && renderEmptyState('No folders yet. Click + to create one.')}
             {tab === 'folders' && filteredFolders.length > 0 && (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
+              <div className="card-grid">
                 {filteredFolders.map(f => (
-                  <div key={f.id} className="card" style={{ padding: 18, cursor: 'pointer', background: t.card, border: `1px solid ${t.cardBorder}` }} onClick={() => handleFolderClick(f)}>
+                  <div key={f.id} className="card card-content" style={{ cursor: 'pointer' }} onClick={() => handleFolderClick(f)}>
                     <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <div style={{ width: 40, height: 40, background: t.folderIconBg, borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20 }}>📁</div>
-                      <button className="delete-btn" style={{ color: t.deleteBtn }} onClick={e => { e.stopPropagation(); openDeleteConfirm(f) }}>✕</button>
+                      <div className="card-icon" style={{ background: t.folderIconBg, fontSize: 20 }}>📁</div>
+                      <button className="btn-delete" onClick={e => { e.stopPropagation(); openDeleteConfirm(f) }}>✕</button>
                     </div>
                     <div style={{ marginTop: 10, fontWeight: 600, color: t.text }}>{f.name}</div>
                   </div>
@@ -1304,18 +1379,18 @@ export default function Home() {
             )}
             {tab === 'students' && filteredStudents.length === 0 && renderEmptyState('No students yet. Click + to create one.')}
             {tab === 'students' && filteredStudents.length > 0 && (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
+              <div className="card-grid">
                 {filteredStudents.map(s => (
-                  <div key={s.id} className="card" style={{ padding: 18, cursor: 'pointer', background: t.card, border: `1px solid ${t.cardBorder}` }} onClick={() => openStudentModal(s)}>
+                  <div key={s.id} className="card card-content" style={{ cursor: 'pointer' }} onClick={() => openStudentModal(s)}>
                     <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <div style={{ width: 40, height: 40, background: t.folderIconBg, borderRadius: 10, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <div className="card-icon" style={{ background: t.folderIconBg, overflow: 'hidden' }}>
                         {studentAvatarUrls[s.id] ? (
-                          <img src={studentAvatarUrls[s.id]} alt={s.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                          <img src={studentAvatarUrls[s.id]} alt={s.name} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 12 }} />
                         ) : (
-                          <span style={{ fontSize: 20 }}>👤</span>
+                          <div className="avatar-initials">{getInitials(s.name)}</div>
                         )}
                       </div>
-                      <button className="delete-btn" style={{ color: t.deleteBtn }} onClick={e => { e.stopPropagation(); openDeleteConfirm(s) }}>✕</button>
+                      <button className="btn-delete" onClick={e => { e.stopPropagation(); openDeleteConfirm(s) }}>✕</button>
                     </div>
                     <div style={{ marginTop: 10, fontWeight: 600, color: t.text }}>{s.name}</div>
                   </div>
@@ -1335,7 +1410,8 @@ export default function Home() {
           title={tab === 'folders' ? 'New Folder' : 'Add Student'}
           aria-label={tab === 'folders' ? 'New Folder' : 'Add Student'}
         >
-          +
+          <span className="fab-icon">+</span>
+          <span className="fab-text">{tab === 'folders' ? 'New Folder' : 'Add Student'}</span>
         </button>
       )}
 
@@ -1346,9 +1422,9 @@ export default function Home() {
             <p style={{ margin: '0 0 20px', color: t.textMuted, fontSize: 14 }}>
               Are you sure you want to delete <strong style={{ color: t.text }}>{deleteCandidate.name}</strong>? This action cannot be undone.
             </p>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-              <button onClick={closeDeleteConfirm} style={{ background: 'transparent', border: `1px solid ${t.btnGhostBorder}`, borderRadius: 10, padding: '10px 20px', cursor: 'pointer', color: t.btnGhostText }}>Cancel</button>
-              <button onClick={handleConfirmDelete} disabled={isDeleting} style={{ background: t.btnPrimary, color: t.btnPrimaryText, border: 'none', borderRadius: 10, padding: '10px 20px', cursor: 'pointer' }}>
+            <div className="button-row">
+              <button className="btn btn-secondary" onClick={closeDeleteConfirm}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleConfirmDelete} disabled={isDeleting}>
                 {isDeleting ? 'Deleting...' : 'Delete'}
               </button>
             </div>
@@ -1362,9 +1438,9 @@ export default function Home() {
           <div className="modal" style={{ background: t.modalBg }} onClick={e => e.stopPropagation()}>
             <h2 style={{ margin: '0 0 4px', fontSize: 18, fontWeight: 700, color: t.text }}>New Folder</h2>
             <input className="app-input" type="text" placeholder="Folder name" value={folderName} onChange={e => setFolderName(e.target.value)} onKeyDown={e => e.key === 'Enter' && createFolder()} autoFocus style={{ marginBottom: 16, border: `1px solid ${t.inputBorder}`, background: t.inputBg, color: t.text }} />
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <button onClick={() => setShowFolderModal(false)} style={{ background: 'transparent', border: `1px solid ${t.btnGhostBorder}`, borderRadius: 10, padding: '10px 20px', cursor: 'pointer', color: t.btnGhostText }}>Cancel</button>
-              <button onClick={createFolder} style={{ background: t.btnPrimary, color: t.btnPrimaryText, border: 'none', borderRadius: 10, padding: '10px 20px', cursor: 'pointer' }}>Create</button>
+            <div className="button-row">
+              <button className="btn btn-secondary" onClick={() => setShowFolderModal(false)}>Cancel</button>
+              <button className="btn btn-primary" onClick={createFolder}>Create</button>
             </div>
           </div>
         </div>
@@ -1391,9 +1467,9 @@ export default function Home() {
                 <img src={studentPhotoPreview} alt="Preview" style={{ width: 90, height: 90, borderRadius: 18, objectFit: 'cover', border: `1px solid ${t.cardBorder}` }} />
               </div>
             )}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <button onClick={closeStudentModal} style={{ background: 'transparent', border: `1px solid ${t.btnGhostBorder}`, borderRadius: 10, padding: '10px 20px', cursor: 'pointer', color: t.btnGhostText }}>Cancel</button>
-              <button onClick={createStudent} style={{ background: t.btnPrimary, color: t.btnPrimaryText, border: 'none', borderRadius: 10, padding: '10px 20px', cursor: 'pointer' }}>Add Student</button>
+            <div className="button-row">
+              <button className="btn btn-secondary" onClick={closeStudentModal}>Cancel</button>
+              <button className="btn btn-primary" onClick={createStudent}>Add Student</button>
             </div>
           </div>
         </div>
@@ -1401,10 +1477,10 @@ export default function Home() {
 
       {/* Student detail screen */}
       {selectedStudent && (
-        <div style={{ position: 'fixed', top: 60, left: 0, right: 0, bottom: 0, zIndex: 200, overflowY: 'auto', background: t.bg, padding: '24px', display: 'flex', flexDirection: 'column' }}>
+        <div className="student-detail-screen">
           <div style={{ maxWidth: 1080, width: '100%', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 24 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
-              <button onClick={() => setSelectedStudent(null)} style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 16, padding: '8px 10px' }}>← Back</button>
+            <div className="student-detail-header">
+              <button className="btn btn-text" onClick={() => setSelectedStudent(null)}>← Back</button>
               <div style={{ width: 48, height: 48, background: t.avatarBg, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22 }}>👤</div>
               <div>
                 <h2 style={{ margin: 0, fontSize: 28, fontWeight: 700, color: t.text }}>{selectedStudent.name}</h2>
@@ -1417,7 +1493,7 @@ export default function Home() {
                 <div>
                   <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: t.text }}>Contents</h3>
                   {studentPathStack.length > 0 && (
-                    <button onClick={handleStudentBack} style={{ background: 'transparent', border: 'none', color: t.textMuted, fontSize: 12, cursor: 'pointer', marginTop: 6 }}>← Back</button>
+                    <button className="btn btn-text breadcrumb-button" onClick={handleStudentBack}>← Back</button>
                   )}
                 </div>
                 <input
@@ -1447,24 +1523,17 @@ export default function Home() {
                     style={{ border: `1px solid ${t.inputBorder}`, background: t.inputBg, color: t.text }}
                   />
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                    <button onClick={() => {
+                    <button className="btn btn-secondary" onClick={() => {
                       setUploadFile(null)
                       setFileTags([])
                       if (fileInputRef.current) fileInputRef.current.value = ''
-                    }} style={{ background: 'transparent', border: `1px solid ${t.btnGhostBorder}`, borderRadius: 10, padding: '8px 14px', cursor: 'pointer', color: t.btnGhostText }}>Clear selection</button>
+                    }}>Clear selection</button>
                     {uploadFile && (
                       <button
+                        className="btn btn-primary"
                         onClick={uploadFileWithTags}
                         disabled={fileUploading}
-                        style={{
-                          background: fileUploading ? '#999' : t.btnPrimary,
-                          color: t.btnPrimaryText,
-                          border: 'none',
-                          borderRadius: 10,
-                          padding: '8px 14px',
-                          cursor: fileUploading ? 'not-allowed' : 'pointer',
-                          fontSize: 13
-                        }}
+                        style={{ fontSize: 13 }}
                       >
                         {fileUploading ? 'Uploading...' : 'Confirm Upload'}
                       </button>
@@ -1530,7 +1599,7 @@ export default function Home() {
                         </>
                       )}
                       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-                        <button onClick={() => setShowNewFolderTypeModal(false)} style={{ background: 'transparent', border: `1px solid ${t.btnGhostBorder}`, borderRadius: 10, padding: '10px 20px', cursor: 'pointer' }}>Cancel</button>
+                        <button className="btn btn-secondary" onClick={() => setShowNewFolderTypeModal(false)}>Cancel</button>
                         <button
                           onClick={newFolderType === 'normal' ? createStudentNormalFolder : createCompiledFolder}
                           disabled={!newFolderNameInput || (newFolderType === 'compiled' && selectedTagIds.length === 0)}
