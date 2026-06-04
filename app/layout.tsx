@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "LUGH",
-  description: "A data management system prototy built for Careerplus-Laspinas",
+  description: "A data management system prototype built for Careerplus-Laspinas",
 };
 
 export default function RootLayout({
