@@ -1,10 +1,9 @@
 -- supabase-reset-schema.sql
 -- WARNING: This script drops tables and resets your app schema. Only run if you want to delete all current app data.
 
--- Optional: enable gen_random_uuid() if not already available
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
--- Drop all app tables
+-- Drop app tables in reverse dependency order
 DROP TABLE IF EXISTS public.file_tags CASCADE;
 DROP TABLE IF EXISTS public.compiled_folders CASCADE;
 DROP TABLE IF EXISTS public.files CASCADE;
@@ -27,6 +26,13 @@ CREATE TABLE public.nodes (
 CREATE INDEX IF NOT EXISTS nodes_user_id_idx ON public.nodes (user_id);
 CREATE INDEX IF NOT EXISTS nodes_parent_id_idx ON public.nodes (parent_id);
 
+ALTER TABLE public.nodes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Authenticated users can manage own nodes" ON public.nodes
+  FOR ALL
+  USING (user_id = auth.uid())
+  WITH CHECK (user_id = auth.uid());
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.nodes TO authenticated;
+
 -- Files metadata table
 CREATE TABLE public.files (
   node_id uuid PRIMARY KEY,
@@ -43,6 +49,27 @@ CREATE TABLE public.files (
 
 CREATE INDEX IF NOT EXISTS files_student_id_idx ON public.files (student_id);
 
+ALTER TABLE public.files ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Authenticated users can manage own file metadata" ON public.files
+  FOR ALL
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.nodes n
+      WHERE n.id = student_id
+        AND n.user_id = auth.uid()
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM public.nodes n
+      WHERE n.id = student_id
+        AND n.user_id = auth.uid()
+    )
+  );
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.files TO authenticated;
+
 -- Tags table
 CREATE TABLE public.tags (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -52,6 +79,13 @@ CREATE TABLE public.tags (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS tags_user_name_uq ON public.tags (user_id, name);
+
+ALTER TABLE public.tags ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Authenticated users can manage own tags" ON public.tags
+  FOR ALL
+  USING (user_id = auth.uid())
+  WITH CHECK (user_id = auth.uid());
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.tags TO authenticated;
 
 -- File tags join table
 CREATE TABLE public.file_tags (
@@ -64,6 +98,29 @@ CREATE TABLE public.file_tags (
 
 CREATE INDEX IF NOT EXISTS file_tags_file_id_idx ON public.file_tags (file_id);
 CREATE INDEX IF NOT EXISTS file_tags_tag_id_idx ON public.file_tags (tag_id);
+
+ALTER TABLE public.file_tags ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Authenticated users can manage own file_tags" ON public.file_tags
+  FOR ALL
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.files f
+      JOIN public.nodes n ON n.id = f.student_id
+      WHERE f.node_id = file_id
+        AND n.user_id = auth.uid()
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM public.files f
+      JOIN public.nodes n ON n.id = f.student_id
+      WHERE f.node_id = file_id
+        AND n.user_id = auth.uid()
+    )
+  );
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.file_tags TO authenticated;
 
 -- Compiled folders configuration
 CREATE TABLE public.compiled_folders (
@@ -78,15 +135,25 @@ CREATE TABLE public.compiled_folders (
 
 CREATE INDEX IF NOT EXISTS compiled_folders_folder_id_idx ON public.compiled_folders (folder_id);
 
--- Prompt for rebuilding schema
---
--- Use this prompt when recreating the database schema for this app:
---
--- "Delete the current app tables and recreate the database schema for the student-folder system.
--- The app needs:
--- - nodes with id, name, type, parent_id, user_id
--- - files metadata keyed by node_id, with student_id, name, storage_path, mime_type, size, uploaded_at
--- - tags with user_id and name
--- - file_tags join table between files and tags
--- - compiled_folders with folder_id, selected_file_ids, and auto_select
--- Also ensure the storage bucket is student-files and add proper storage RLS for storage.objects."
+ALTER TABLE public.compiled_folders ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Authenticated users can manage own compiled folders" ON public.compiled_folders
+  FOR ALL
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.nodes n
+      WHERE n.id = folder_id
+        AND n.user_id = auth.uid()
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM public.nodes n
+      WHERE n.id = folder_id
+        AND n.user_id = auth.uid()
+    )
+  );
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.compiled_folders TO authenticated;
+
+-- End of schema reset

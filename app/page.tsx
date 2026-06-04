@@ -270,11 +270,19 @@ export default function Home() {
       .from('nodes').select('*').eq('user_id', userId)
       .eq('type', 'folder').eq('name', 'Students').is('parent_id', null).maybeSingle()
     if (data) return data.id
+
     const { data: created, error: createError } = await supabase
       .from('nodes').insert({ name: 'Students', type: 'folder', parent_id: null, user_id: userId })
       .select().single()
-    if (createError) { console.log('STUDENTS FOLDER ERROR:', createError); return null }
-    return created.id
+
+    if (createError) {
+      console.error('STUDENTS FOLDER ERROR:', createError)
+      setToastType('error')
+      setToastMessage('Unable to create Students folder: ' + (createError.message || 'database error'))
+      return null
+    }
+
+    return created?.id || null
   }
 
   async function createNode(payload: { name: string; type: Node['type']; parent_id: string | null; user_id: string; profile_photo_path?: string | null }) {
@@ -561,32 +569,60 @@ export default function Home() {
       .single()
 
     if (compiled) {
-      let fileIds: string[] = compiled.selected_file_ids
-      if (compiled.auto_select) {
-        fileIds = compiled.selected_file_ids
-      }
-      const { data: files } = await supabase
+      const { data: childFiles, error: childError } = await supabase
         .from('nodes')
         .select('*')
-        .in('id', fileIds)
+        .eq('parent_id', folder.id)
         .eq('type', 'file')
-      const fileMetaById: Record<string, FileMeta> = {}
-      if (files?.length) {
+
+      if (childError) {
+        console.error('LOAD COMPILED CHILD FILES ERROR:', childError)
+      }
+
+      if (childFiles && childFiles.length > 0) {
+        const fileMetaById: Record<string, FileMeta> = {}
         const fileMetaResult = await supabase
           .from('files')
           .select('*')
-          .in('node_id', files.map(f => f.id))
+          .in('node_id', childFiles.map(f => f.id))
         if (fileMetaResult.error) console.error(fileMetaResult.error)
         const fileMetaRows = (fileMetaResult.data || []) as FileMeta[]
         fileMetaRows.forEach(row => {
           fileMetaById[row.node_id] = row
         })
+        setStudentFolderContents(childFiles.map(file => ({
+          ...file,
+          fileMeta: fileMetaById[file.id]
+        })))
+        setStudentPathStack([...studentPathStack, folder.id])
+      } else {
+        let fileIds: string[] = compiled.selected_file_ids
+        if (compiled.auto_select && selectedStudent) {
+          fileIds = await getCompiledFileIds(compiled.tag_ids, selectedStudent.id)
+        }
+        const { data: files } = await supabase
+          .from('nodes')
+          .select('*')
+          .in('id', fileIds)
+          .eq('type', 'file')
+        const fileMetaById: Record<string, FileMeta> = {}
+        if (files?.length) {
+          const fileMetaResult = await supabase
+            .from('files')
+            .select('*')
+            .in('node_id', files.map(f => f.id))
+          if (fileMetaResult.error) console.error(fileMetaResult.error)
+          const fileMetaRows = (fileMetaResult.data || []) as FileMeta[]
+          fileMetaRows.forEach(row => {
+            fileMetaById[row.node_id] = row
+          })
+        }
+        setStudentFolderContents((files || []).map(file => ({
+          ...file,
+          fileMeta: fileMetaById[file.id]
+        })))
+        setStudentPathStack([...studentPathStack, folder.id])
       }
-      setStudentFolderContents((files || []).map(file => ({
-        ...file,
-        fileMeta: fileMetaById[file.id]
-      })))
-      setStudentPathStack([...studentPathStack, folder.id])
     } else {
       setStudentPathStack([...studentPathStack, folder.id])
       await loadStudentContents(selectedStudent!.id, folder.id)
@@ -1080,8 +1116,126 @@ export default function Home() {
     }
   }
 
+  async function getCompiledFileIds(tagIds: string[], studentId: string) {
+    if (!tagIds.length) return []
+    const fileIdsByTag: Record<string, string[]> = {}
+    for (const tid of tagIds) {
+      const { data } = await supabase.from('file_tags').select('file_id').eq('tag_id', tid)
+      fileIdsByTag[tid] = data?.map(d => d.file_id) || []
+    }
+    const tagSets = Object.values(fileIdsByTag)
+    if (tagSets.length === 0) return []
+    const intersection = tagSets.reduce((a, b) => a.filter(id => b.includes(id)), tagSets[0])
+    if (intersection.length === 0) return []
+    const { data: fileRows, error } = await supabase.from('files').select('node_id').in('node_id', intersection).eq('student_id', studentId)
+    if (error) {
+      console.error('LOAD COMPILED FILE IDS ERROR:', error)
+      return []
+    }
+    return (fileRows || []).map(row => row.node_id)
+  }
+
+  async function getCompiledCandidateFileIds(tagIds: string[], studentId: string) {
+    if (!tagIds.length) return []
+    const fileIdsByTag: Record<string, string[]> = {}
+    for (const tid of tagIds) {
+      const { data } = await supabase.from('file_tags').select('file_id').eq('tag_id', tid)
+      fileIdsByTag[tid] = data?.map(d => d.file_id) || []
+    }
+    const union = Array.from(new Set(Object.values(fileIdsByTag).flat()))
+    if (union.length === 0) return []
+    const { data: fileRows, error } = await supabase.from('files').select('node_id').in('node_id', union).eq('student_id', studentId)
+    if (error) {
+      console.error('LOAD COMPILED CANDIDATE FILE IDS ERROR:', error)
+      return []
+    }
+    return (fileRows || []).map(row => row.node_id)
+  }
+
+  async function copyFileToFolder(sourceFileId: string, targetFolderId: string) {
+    const { data: sourceNode, error: nodeError } = await supabase.from('nodes').select('*').eq('id', sourceFileId).single()
+    if (nodeError || !sourceNode) {
+      throw nodeError || new Error('Source file node not found')
+    }
+
+    const { data: fileMeta, error: fileMetaError } = await supabase.from('files').select('*').eq('node_id', sourceFileId).single()
+    if (fileMetaError || !fileMeta) {
+      throw fileMetaError || new Error('Source file metadata not found')
+    }
+
+    const { data: newFileNode, error: createError } = await supabase.from('nodes')
+      .insert({
+        name: sourceNode.name,
+        type: 'file',
+        parent_id: targetFolderId,
+        user_id: user.id
+      })
+      .select()
+      .single()
+
+    if (createError || !newFileNode) {
+      throw createError || new Error('Failed to create compiled file node')
+    }
+
+    const metadata = {
+      node_id: newFileNode.id,
+      name: fileMeta.name,
+      size: fileMeta.size,
+      mime_type: fileMeta.mime_type,
+      uploaded_at: fileMeta.uploaded_at,
+      storage_path: fileMeta.storage_path,
+      student_id: fileMeta.student_id
+    }
+
+    const { error: insertMetaError } = await supabase.from('files').insert(metadata)
+    if (insertMetaError) {
+      await supabase.from('nodes').delete().eq('id', newFileNode.id)
+      throw insertMetaError
+    }
+
+    return newFileNode.id
+  }
+
+  async function ensureCompiledFoldersTableAccessible() {
+    const { data, error } = await supabase
+      .from('compiled_folders')
+      .select('folder_id')
+      .limit(1)
+
+    if (error) {
+      console.error('COMPILED_FOLDERS TABLE ACCESS ERROR', {
+        message: error.message,
+        details: error.details,
+        hint: error.hint,
+        code: error.code
+      })
+      throw new Error(
+        error.message?.toLowerCase().includes('does not exist')
+          ? 'compiled_folders table does not exist. Verify your Supabase schema and permissions.'
+          : `Unable to access compiled_folders table: ${error.message || 'unknown error'}`
+      )
+    }
+
+    return true
+  }
+
   async function createCompiledFolder() {
     if (!newFolderNameInput || !selectedStudent || !user || selectedTagIds.length === 0) return
+    if (compilationMode === 'manual' && manuallySelectedFileIds.length === 0) {
+      setToastType('error')
+      setToastMessage('Select at least one file for manual compilation.')
+      return
+    }
+
+    try {
+      await ensureCompiledFoldersTableAccessible()
+    } catch (error: any) {
+      console.error('COMPILED FOLDER SCHEMA CHECK FAILED:', error)
+      setToastType('error')
+      setToastMessage(error?.message || 'Unable to access compiled_folders table. Verify Supabase schema.')
+      return
+    }
+
     const parentId = await getStudentCurrentParentId()
     let folderNode: Node
     try {
@@ -1093,28 +1247,53 @@ export default function Home() {
       return
     }
 
-    let fileIdsByTag: Record<string, string[]> = {}
-    for (const tid of selectedTagIds) {
-      const { data } = await supabase.from('file_tags').select('file_id').eq('tag_id', tid)
-      fileIdsByTag[tid] = data?.map(d => d.file_id) || []
-    }
-    const intersection = Object.values(fileIdsByTag).reduce((a, b) => a.filter(id => b.includes(id)), [])
-    const { data: candidateFiles } = await supabase.from('nodes').select('id').in('id', intersection).eq('type', 'file')
-    const matchedIds = candidateFiles?.map(f => f.id) || []
+    const matchedIds = compilationMode === 'auto'
+      ? await getCompiledFileIds(selectedTagIds, selectedStudent.id)
+      : await getCompiledCandidateFileIds(selectedTagIds, selectedStudent.id)
 
     let selectedIds: string[] = []
     if (compilationMode === 'auto') {
       selectedIds = matchedIds
     } else {
-      selectedIds = manuallySelectedFileIds
+      selectedIds = manuallySelectedFileIds.filter(id => matchedIds.includes(id))
     }
 
-    await supabase.from('compiled_folders').insert({
+    const copiedFileIds: string[] = []
+    for (const sourceFileId of selectedIds) {
+      try {
+        const copiedId = await copyFileToFolder(sourceFileId, folderNode.id)
+        copiedFileIds.push(copiedId)
+      } catch (error) {
+        console.error('COPY COMPILED FILE ERROR:', error)
+      }
+    }
+
+    const compiledPayload = {
       folder_id: folderNode.id,
       tag_ids: selectedTagIds,
       auto_select: compilationMode === 'auto',
       selected_file_ids: selectedIds
-    })
+    }
+
+    const { data: compiledData, error: compiledInsertError } = await (supabase
+      .from('compiled_folders')
+      .insert(compiledPayload)
+      .select('id') as any)
+
+    const insertFailed = compiledInsertError && !Array.isArray(compiledData)
+    if (insertFailed) {
+      console.error('CREATE COMPILED FOLDER METADATA ERROR raw:', compiledInsertError)
+      console.error('CREATE COMPILED FOLDER METADATA PAYLOAD:', compiledPayload)
+
+      await supabase.from('nodes').delete().in('id', [...copiedFileIds, folderNode.id])
+      setToastType('error')
+      setToastMessage('Failed to create compiled folder. Please check the compiled_folders table and permissions.')
+      return
+    }
+
+    if (compiledInsertError && Array.isArray(compiledData) && compiledData.length > 0) {
+      console.warn('CREATE COMPILED FOLDER METADATA WARNING: insert returned data despite error', compiledInsertError, compiledData)
+    }
 
     setShowNewFolderTypeModal(false)
     setNewFolderNameInput('')
@@ -1139,20 +1318,30 @@ export default function Home() {
   }, [showNewFolderTypeModal, newFolderType, user])
 
   useEffect(() => {
-    if (newFolderType === 'compiled' && selectedTagIds.length) {
+    if (newFolderType === 'compiled' && selectedTagIds.length && selectedStudent) {
       const fetchMatching = async () => {
-        let fileIdsByTag: Record<string, string[]> = {}
-        for (const tid of selectedTagIds) {
-          const { data } = await supabase.from('file_tags').select('file_id').eq('tag_id', tid)
-          fileIdsByTag[tid] = data?.map(d => d.file_id) || []
+        const fileIds = compilationMode === 'manual'
+          ? await getCompiledCandidateFileIds(selectedTagIds, selectedStudent.id)
+          : await getCompiledFileIds(selectedTagIds, selectedStudent.id)
+
+        if (fileIds.length === 0) {
+          setAvailableFilesForCompilation([])
+          return
         }
-        const intersection = Object.values(fileIdsByTag).reduce((a, b) => a.filter(id => b.includes(id)), [])
-        const { data: files } = await supabase.from('nodes').select('id,name').in('id', intersection).eq('type', 'file')
+
+        const { data: files, error } = await supabase.from('nodes').select('id,name').in('id', fileIds).eq('type', 'file')
+        if (error) {
+          console.error('LOAD COMPILED FILES ERROR:', error)
+          setAvailableFilesForCompilation([])
+          return
+        }
         setAvailableFilesForCompilation(files || [])
       }
       fetchMatching()
+    } else {
+      setAvailableFilesForCompilation([])
     }
-  }, [selectedTagIds, newFolderType])
+  }, [selectedTagIds, newFolderType, compilationMode, selectedStudent])
 
   function renderEmptyState(message: string) {
     return (
@@ -1580,21 +1769,32 @@ export default function Home() {
                               <option value="manual">Manual – let me choose which files to include</option>
                             </select>
                           </div>
-                          {compilationMode === 'manual' && availableFilesForCompilation.length > 0 && (
-                            <div style={{ marginBottom: 16, maxHeight: 150, overflowY: 'auto', border: `1px solid ${t.cardBorder}`, borderRadius: 8, padding: 8 }}>
-                              <p style={{ fontSize: 12, marginBottom: 8 }}>Select files to include:</p>
-                              {availableFilesForCompilation.map(file => (
-                                <label key={file.id} style={{ display: 'block', fontSize: 13 }}>
-                                  <input type="checkbox" checked={manuallySelectedFileIds.includes(file.id)} onChange={e => {
-                                    if (e.target.checked) setManuallySelectedFileIds(prev => [...prev, file.id])
-                                    else setManuallySelectedFileIds(prev => prev.filter(id => id !== file.id))
-                                  }} /> {file.name}
+                          {compilationMode === 'manual' && (
+                            <>
+                              {availableFilesForCompilation.length > 0 ? (
+                                <div style={{ marginBottom: 16, maxHeight: 150, overflowY: 'auto', border: `1px solid ${t.cardBorder}`, borderRadius: 8, padding: 8 }}>
+                                  <p style={{ fontSize: 12, marginBottom: 8 }}>Select files to include:</p>
+                                  {availableFilesForCompilation.map(file => (
+                                    <label key={file.id} style={{ display: 'block', fontSize: 13 }}>
+                                      <input type="checkbox" checked={manuallySelectedFileIds.includes(file.id)} onChange={e => {
+                                        if (e.target.checked) setManuallySelectedFileIds(prev => [...prev, file.id])
+                                        else setManuallySelectedFileIds(prev => prev.filter(id => id !== file.id))
+                                      }} /> {file.name}
                                 </label>
-                              ))}
-                            </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                selectedTagIds.length > 0 && (
+                                  <div style={{ fontSize: 12, color: t.textMuted, marginBottom: 12 }}>No files match the selected tag(s). Try different tags or switch to Auto mode.</div>
+                                )
+                              )}
+                            </>
                           )}
                           {selectedTagIds.length === 0 && (
                             <div style={{ fontSize: 12, color: t.textMuted, marginBottom: 12 }}>Select at least one tag before creating a compiled folder.</div>
+                          )}
+                          {selectedTagIds.length > 0 && compilationMode === 'manual' && manuallySelectedFileIds.length === 0 && availableFilesForCompilation.length > 0 && (
+                            <div style={{ fontSize: 12, color: t.textMuted, marginBottom: 12 }}>Pick at least one matched file to include in the manual compiled folder.</div>
                           )}
                         </>
                       )}
@@ -1602,14 +1802,14 @@ export default function Home() {
                         <button className="btn btn-secondary" onClick={() => setShowNewFolderTypeModal(false)}>Cancel</button>
                         <button
                           onClick={newFolderType === 'normal' ? createStudentNormalFolder : createCompiledFolder}
-                          disabled={!newFolderNameInput || (newFolderType === 'compiled' && selectedTagIds.length === 0)}
+                          disabled={!newFolderNameInput || (newFolderType === 'compiled' && (selectedTagIds.length === 0 || (compilationMode === 'manual' && manuallySelectedFileIds.length === 0)))}
                           style={{
-                            background: !newFolderNameInput || (newFolderType === 'compiled' && selectedTagIds.length === 0) ? '#999' : t.btnPrimary,
+                            background: !newFolderNameInput || (newFolderType === 'compiled' && (selectedTagIds.length === 0 || (compilationMode === 'manual' && manuallySelectedFileIds.length === 0))) ? '#999' : t.btnPrimary,
                             color: t.btnPrimaryText,
                             border: 'none',
                             borderRadius: 10,
                             padding: '10px 20px',
-                            cursor: !newFolderNameInput || (newFolderType === 'compiled' && selectedTagIds.length === 0) ? 'not-allowed' : 'pointer'
+                            cursor: !newFolderNameInput || (newFolderType === 'compiled' && (selectedTagIds.length === 0 || (compilationMode === 'manual' && manuallySelectedFileIds.length === 0))) ? 'not-allowed' : 'pointer'
                           }}
                         >
                           Create
